@@ -3,6 +3,27 @@ Changelog
 
 # 3.x release
 
+## v3.0.0-beta.10
+
+- **Breaking:** minimum supported Node.js version is now 12.8.
+- **Breaking:** node-fetch is now a pure ESM module.
+- Other: update readme to inform users about ESM.
+- Other: update dependencies.
+
+## v3.0.0-beta.9
+
+**This is an important security release. It is strongly recommended to update as soon as possible.**
+
+- Fix: honor the `size` option after following a redirect.
+
+## v3.0.0-beta.8
+
+- Enhance: remove string-to-arraybuffer (#882).
+- Enhance: remove parted dependency (#883).
+- Fix: export package.json (#908).
+- Fix: minimum Node.js version (#874).
+- Other: fix typo.
+
 ## v3.0.0-beta.7
 
 - **Breaking:** minimum supported Node.js version is now 10.17.
@@ -88,6 +109,12 @@ Changelog
 
 # 2.x release
 
+## v2.6.1
+
+**This is an important security release. It is strongly recommended to update as soon as possible.**
+
+- Fix: honor the `size` option after following a redirect.
+
 ## v2.6.0
 
 - Enhance: `options.agent`, it now accepts a function that returns custom http(s).Agent instance based on current URL, see readme for more information.
@@ -157,7 +184,7 @@ Fix packaging errors in v2.1.0.
 
 ## v2.0.0
 
-This is a major release. Check [our upgrade guide](https://github.com/node-fetch/node-fetch/blob/master/UPGRADE-GUIDE.md) for an overview on some key differences between v1 and v2.
+This is a major release. Check [our upgrade guide](https://github.com/node-fetch/node-fetch/blob/master/docs/v2-UPGRADE-GUIDE.md) for an overview on some key differences between v1 and v2.
 
 ### General changes
 

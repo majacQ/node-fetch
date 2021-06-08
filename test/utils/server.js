@@ -1,12 +1,11 @@
 import http from 'http';
 import zlib from 'zlib';
 import Busboy from 'busboy';
+import {once} from 'events';
 
 export default class TestServer {
 	constructor() {
 		this.server = http.createServer(this.router);
-		this.port = 30001;
-		this.hostname = 'localhost';
 		// Node 8 default keepalive timeout is 5000ms
 		// make it shorter here as we want to close server quickly at the end of tests
 		this.server.keepAliveTimeout = 1000;
@@ -18,12 +17,22 @@ export default class TestServer {
 		});
 	}
 
-	start(cb) {
-		this.server.listen(this.port, this.hostname, cb);
+	async start() {
+		this.server.listen(0, 'localhost');
+		return once(this.server, 'listening');
 	}
 
-	stop(cb) {
-		this.server.close(cb);
+	async stop() {
+		this.server.close();
+		return once(this.server, 'close');
+	}
+
+	get port() {
+		return this.server.address().port;
+	}
+
+	get hostname() {
+		return 'localhost';
 	}
 
 	mockResponse(responseHandler) {
@@ -59,6 +68,10 @@ export default class TestServer {
 			res.statusCode = 200;
 			res.setHeader('Content-Type', 'text/plain');
 			res.end('text');
+		}
+
+		if (p === '/no-status-text') {
+			res.writeHead(200, '', {}).end();
 		}
 
 		if (p === '/options') {
@@ -279,6 +292,11 @@ export default class TestServer {
 			res.end();
 		}
 
+		if (p === '/redirect/bad-location') {
+			res.socket.write('HTTP/1.1 301\r\nLocation: ☃\r\nContent-Length: 0\r\n');
+			res.socket.end('\r\n');
+		}
+
 		if (p === '/error/400') {
 			res.statusCode = 400;
 			res.setHeader('Content-Type', 'text/plain');
@@ -307,6 +325,23 @@ export default class TestServer {
 			setTimeout(() => {
 				res.destroy();
 			}, 100);
+		}
+
+		if (p === '/error/premature/chunked') {
+			res.writeHead(200, {
+				'Content-Type': 'application/json',
+				'Transfer-Encoding': 'chunked'
+			});
+
+			res.write(`${JSON.stringify({data: 'hi'})}\n`);
+
+			setTimeout(() => {
+				res.write(`${JSON.stringify({data: 'bye'})}\n`);
+			}, 200);
+
+			setTimeout(() => {
+				res.destroy();
+			}, 400);
 		}
 
 		if (p === '/error/json') {
@@ -369,7 +404,7 @@ export default class TestServer {
 				body += `${fieldName}=${fileName}`;
 				// consume file data
 				// eslint-disable-next-line no-empty, no-unused-vars
-				for await (const c of file) { }
+				for await (const c of file) {}
 			});
 
 			busboy.on('field', (fieldName, value) => {

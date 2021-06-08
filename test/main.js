@@ -12,13 +12,11 @@ import chaiPromised from 'chai-as-promised';
 import chaiIterator from 'chai-iterator';
 import chaiString from 'chai-string';
 import FormData from 'form-data';
-import FormDataNode from 'formdata-node';
-import stringToArrayBuffer from 'string-to-arraybuffer';
+import {FormData as FormDataNode} from 'formdata-node';
 import delay from 'delay';
-import AbortControllerPolyfill from 'abortcontroller-polyfill/dist/abortcontroller.js';
-import AbortController2 from 'abort-controller';
-
-const {AbortController} = AbortControllerPolyfill;
+import AbortControllerMysticatea from 'abort-controller';
+import abortControllerPolyfill from 'abortcontroller-polyfill/dist/abortcontroller.js';
+const AbortControllerPolyfill = abortControllerPolyfill.AbortController;
 
 // Test subjects
 import Blob from 'fetch-blob';
@@ -48,17 +46,6 @@ chai.use(chaiString);
 chai.use(chaiTimeout);
 const {expect} = chai;
 
-const local = new TestServer();
-const base = `http://${local.hostname}:${local.port}/`;
-
-before(done => {
-	local.start(done);
-});
-
-after(done => {
-	local.stop(done);
-});
-
 function streamToPromise(stream, dataHandler) {
 	return new Promise((resolve, reject) => {
 		stream.on('data', (...args) => {
@@ -72,6 +59,18 @@ function streamToPromise(stream, dataHandler) {
 }
 
 describe('node-fetch', () => {
+	const local = new TestServer();
+	let base;
+
+	before(async () => {
+		await local.start();
+		base = `http://${local.hostname}:${local.port}/`;
+	});
+
+	after(async () => {
+		return local.stop();
+	});
+
 	it('should return a promise', () => {
 		const url = `${base}hello`;
 		const p = fetch(url);
@@ -455,6 +454,18 @@ describe('node-fetch', () => {
 		});
 	});
 
+	it('should support redirect mode, manual flag, broken Location header', () => {
+		const url = `${base}redirect/bad-location`;
+		const options = {
+			redirect: 'manual'
+		};
+		return fetch(url, options).then(res => {
+			expect(res.url).to.equal(url);
+			expect(res.status).to.equal(301);
+			expect(res.headers.get('location')).to.equal(`${base}redirect/%C3%A2%C2%98%C2%83`);
+		});
+	});
+
 	it('should support redirect mode, error flag', () => {
 		const url = `${base}redirect/301`;
 		const options = {
@@ -508,6 +519,19 @@ describe('node-fetch', () => {
 			expect(res.url).to.equal(url);
 			expect(res.status).to.equal(301);
 			expect(res.headers.get('location')).to.be.null;
+		});
+	});
+
+	it('should throw a TypeError on an invalid redirect option', () => {
+		const url = `${base}redirect/301`;
+		const options = {
+			redirect: 'foobar'
+		};
+		return fetch(url, options).then(() => {
+			expect.fail();
+		}, error => {
+			expect(error).to.be.an.instanceOf(TypeError);
+			expect(error.message).to.equal('Redirect option \'foobar\' is not a valid value of RequestRedirect');
 		});
 	});
 
@@ -583,7 +607,75 @@ describe('node-fetch', () => {
 			expect(res.status).to.equal(200);
 			expect(res.ok).to.be.true;
 			return expect(res.text()).to.eventually.be.rejectedWith(Error)
-				.and.have.property('message').matches(/Premature close|The operation was aborted/);
+				.and.have.property('message').matches(/Premature close|The operation was aborted|aborted/);
+		});
+	});
+
+	it('should handle network-error in chunked response', () => {
+		const url = `${base}error/premature/chunked`;
+		return fetch(url).then(res => {
+			expect(res.status).to.equal(200);
+			expect(res.ok).to.be.true;
+
+			return expect(new Promise((resolve, reject) => {
+				res.body.on('error', reject);
+				res.body.on('close', resolve);
+			})).to.eventually.be.rejectedWith(Error, 'Premature close')
+				.and.have.property('code', 'ERR_STREAM_PREMATURE_CLOSE');
+		});
+	});
+
+	it('should handle network-error in chunked response async iterator', () => {
+		const url = `${base}error/premature/chunked`;
+		return fetch(url).then(res => {
+			expect(res.status).to.equal(200);
+			expect(res.ok).to.be.true;
+
+			const read = async body => {
+				const chunks = [];
+
+				if (process.version < 'v14.15.2') {
+					// In older Node.js versions, some errors don't come out in the async iterator; we have
+					// to pick them up from the event-emitter and then throw them after the async iterator
+					let error;
+					body.on('error', err => {
+						error = err;
+					});
+
+					for await (const chunk of body) {
+						chunks.push(chunk);
+					}
+
+					if (error) {
+						throw error;
+					}
+
+					return new Promise(resolve => {
+						body.on('close', () => resolve(chunks));
+					});
+				}
+
+				for await (const chunk of body) {
+					chunks.push(chunk);
+				}
+
+				return chunks;
+			};
+
+			return expect(read(res.body))
+				.to.eventually.be.rejectedWith(Error, 'Premature close')
+				.and.have.property('code', 'ERR_STREAM_PREMATURE_CLOSE');
+		});
+	});
+
+	it('should handle network-error in chunked response in consumeBody', () => {
+		const url = `${base}error/premature/chunked`;
+		return fetch(url).then(res => {
+			expect(res.status).to.equal(200);
+			expect(res.ok).to.be.true;
+
+			return expect(res.text())
+				.to.eventually.be.rejectedWith(Error, 'Premature close');
 		});
 	});
 
@@ -599,6 +691,13 @@ describe('node-fetch', () => {
 		return fetch(url).then(res => {
 			expect(res.headers.get('content-type')).to.equal('application/json');
 			return expect(res.json()).to.eventually.be.rejectedWith(Error);
+		});
+	});
+
+	it('should handle response with no status text', () => {
+		const url = `${base}no-status-text`;
+		return fetch(url).then(res => {
+			expect(res.statusText).to.equal('');
 		});
 	});
 
@@ -781,7 +880,7 @@ describe('node-fetch', () => {
 			.then(res => {
 				expect(res.status).to.equal(200);
 			})
-			.catch(() => { })
+			.catch(() => {})
 			.then(() => {
 				// Wait a few ms to see if a uncaught error occurs
 				setTimeout(() => {
@@ -827,200 +926,240 @@ describe('node-fetch', () => {
 		});
 	});
 
-	it('should support request cancellation with signal', function () {
-		this.timeout(500);
-		const controller = new AbortController();
-		const controller2 = new AbortController2();
+	const testAbortController = (name, buildAbortController, moreTests = null) => {
+		describe(`AbortController (${name})`, () => {
+			let controller;
 
-		const fetches = [
-			fetch(`${base}timeout`, {signal: controller.signal}),
-			fetch(`${base}timeout`, {signal: controller2.signal}),
-			fetch(
-				`${base}timeout`,
-				{
-					method: 'POST',
-					signal: controller.signal,
-					headers: {
-						'Content-Type': 'application/json',
-						body: JSON.stringify({hello: 'world'})
-					}
-				}
-			)
-		];
-		setTimeout(() => {
-			controller.abort();
-			controller2.abort();
-		}, 100);
-
-		return Promise.all(fetches.map(fetched => expect(fetched)
-			.to.eventually.be.rejected
-			.and.be.an.instanceOf(Error)
-			.and.include({
-				type: 'aborted',
-				name: 'AbortError'
-			})
-		));
-	});
-
-	it('should reject immediately if signal has already been aborted', () => {
-		const url = `${base}timeout`;
-		const controller = new AbortController();
-		const options = {
-			signal: controller.signal
-		};
-		controller.abort();
-		const fetched = fetch(url, options);
-		return expect(fetched).to.eventually.be.rejected
-			.and.be.an.instanceOf(Error)
-			.and.include({
-				type: 'aborted',
-				name: 'AbortError'
+			beforeEach(() => {
+				controller = buildAbortController();
 			});
-	});
 
-	it('should remove internal AbortSignal event listener after request is aborted', () => {
-		const controller = new AbortController();
-		const {signal} = controller;
-		const promise = fetch(
-			`${base}timeout`,
-			{signal}
-		);
-		const result = expect(promise).to.eventually.be.rejected
-			.and.be.an.instanceof(Error)
-			.and.have.property('name', 'AbortError')
-			.then(() => {
-				expect(signal.listeners.abort.length).to.equal(0);
-			});
-		controller.abort();
-		return result;
-	});
+			it('should support request cancellation with signal', () => {
+				const fetches = [
+					fetch(
+						`${base}timeout`,
+						{
+							method: 'POST',
+							signal: controller.signal,
+							headers: {
+								'Content-Type': 'application/json',
+								body: JSON.stringify({hello: 'world'})
+							}
+						}
+					)
+				];
+				setTimeout(() => {
+					controller.abort();
+				}, 100);
 
-	it('should allow redirects to be aborted', () => {
-		const abortController = new AbortController();
-		const request = new Request(`${base}redirect/slow`, {
-			signal: abortController.signal
-		});
-		setTimeout(() => {
-			abortController.abort();
-		}, 20);
-		return expect(fetch(request)).to.be.eventually.rejected
-			.and.be.an.instanceOf(Error)
-			.and.have.property('name', 'AbortError');
-	});
-
-	it('should allow redirected response body to be aborted', () => {
-		const abortController = new AbortController();
-		const request = new Request(`${base}redirect/slow-stream`, {
-			signal: abortController.signal
-		});
-		return expect(fetch(request).then(res => {
-			expect(res.headers.get('content-type')).to.equal('text/plain');
-			const result = res.text();
-			abortController.abort();
-			return result;
-		})).to.be.eventually.rejected
-			.and.be.an.instanceOf(Error)
-			.and.have.property('name', 'AbortError');
-	});
-
-	it('should remove internal AbortSignal event listener after request and response complete without aborting', () => {
-		const controller = new AbortController();
-		const {signal} = controller;
-		const fetchHtml = fetch(`${base}html`, {signal})
-			.then(res => res.text());
-		const fetchResponseError = fetch(`${base}error/reset`, {signal});
-		const fetchRedirect = fetch(`${base}redirect/301`, {signal}).then(res => res.json());
-		return Promise.all([
-			expect(fetchHtml).to.eventually.be.fulfilled.and.equal('<html></html>'),
-			expect(fetchResponseError).to.be.eventually.rejected,
-			expect(fetchRedirect).to.eventually.be.fulfilled
-		]).then(() => {
-			expect(signal.listeners.abort.length).to.equal(0);
-		});
-	});
-
-	it('should reject response body with AbortError when aborted before stream has been read completely', () => {
-		const controller = new AbortController();
-		return expect(fetch(
-			`${base}slow`,
-			{signal: controller.signal}
-		))
-			.to.eventually.be.fulfilled
-			.then(res => {
-				const promise = res.text();
-				controller.abort();
-				return expect(promise)
+				return Promise.all(fetches.map(fetched => expect(fetched)
 					.to.eventually.be.rejected
-					.and.be.an.instanceof(Error)
+					.and.be.an.instanceOf(Error)
+					.and.include({
+						type: 'aborted',
+						name: 'AbortError'
+					})
+				));
+			});
+
+			it('should support multiple request cancellation with signal', () => {
+				const fetches = [
+					fetch(`${base}timeout`, {signal: controller.signal}),
+					fetch(
+						`${base}timeout`,
+						{
+							method: 'POST',
+							signal: controller.signal,
+							headers: {
+								'Content-Type': 'application/json',
+								body: JSON.stringify({hello: 'world'})
+							}
+						}
+					)
+				];
+				setTimeout(() => {
+					controller.abort();
+				}, 100);
+
+				return Promise.all(fetches.map(fetched => expect(fetched)
+					.to.eventually.be.rejected
+					.and.be.an.instanceOf(Error)
+					.and.include({
+						type: 'aborted',
+						name: 'AbortError'
+					})
+				));
+			});
+
+			it('should reject immediately if signal has already been aborted', () => {
+				const url = `${base}timeout`;
+				const options = {
+					signal: controller.signal
+				};
+				controller.abort();
+				const fetched = fetch(url, options);
+				return expect(fetched).to.eventually.be.rejected
+					.and.be.an.instanceOf(Error)
+					.and.include({
+						type: 'aborted',
+						name: 'AbortError'
+					});
+			});
+
+			it('should allow redirects to be aborted', () => {
+				const request = new Request(`${base}redirect/slow`, {
+					signal: controller.signal
+				});
+				setTimeout(() => {
+					controller.abort();
+				}, 20);
+				return expect(fetch(request)).to.be.eventually.rejected
+					.and.be.an.instanceOf(Error)
 					.and.have.property('name', 'AbortError');
 			});
-	});
 
-	it('should reject response body methods immediately with AbortError when aborted before stream is disturbed', () => {
-		const controller = new AbortController();
-		return expect(fetch(
-			`${base}slow`,
-			{signal: controller.signal}
-		))
-			.to.eventually.be.fulfilled
-			.then(res => {
-				controller.abort();
-				return expect(res.text())
-					.to.eventually.be.rejected
-					.and.be.an.instanceof(Error)
+			it('should allow redirected response body to be aborted', () => {
+				const request = new Request(`${base}redirect/slow-stream`, {
+					signal: controller.signal
+				});
+				return expect(fetch(request).then(res => {
+					expect(res.headers.get('content-type')).to.equal('text/plain');
+					const result = res.text();
+					controller.abort();
+					return result;
+				})).to.be.eventually.rejected
+					.and.be.an.instanceOf(Error)
 					.and.have.property('name', 'AbortError');
 			});
-	});
 
-	it('should emit error event to response body with an AbortError when aborted before underlying stream is closed', done => {
-		const controller = new AbortController();
-		expect(fetch(
-			`${base}slow`,
-			{signal: controller.signal}
-		))
-			.to.eventually.be.fulfilled
-			.then(res => {
-				res.body.once('error', err => {
-					expect(err)
-						.to.be.an.instanceof(Error)
-						.and.have.property('name', 'AbortError');
-					done();
-				});
-				controller.abort();
+			it('should reject response body with AbortError when aborted before stream has been read completely', () => {
+				return expect(fetch(
+					`${base}slow`,
+					{signal: controller.signal}
+				))
+					.to.eventually.be.fulfilled
+					.then(res => {
+						const promise = res.text();
+						controller.abort();
+						return expect(promise)
+							.to.eventually.be.rejected
+							.and.be.an.instanceof(Error)
+							.and.have.property('name', 'AbortError');
+					});
 			});
-	});
 
-	it('should cancel request body of type Stream with AbortError when aborted', () => {
-		const controller = new AbortController();
-		const body = new stream.Readable({objectMode: true});
-		body._read = () => { };
-		const promise = fetch(
-			`${base}slow`,
-			{signal: controller.signal, body, method: 'POST'}
-		);
+			it('should reject response body methods immediately with AbortError when aborted before stream is disturbed', () => {
+				return expect(fetch(
+					`${base}slow`,
+					{signal: controller.signal}
+				))
+					.to.eventually.be.fulfilled
+					.then(res => {
+						controller.abort();
+						return expect(res.text())
+							.to.eventually.be.rejected
+							.and.be.an.instanceof(Error)
+							.and.have.property('name', 'AbortError');
+					});
+			});
 
-		const result = Promise.all([
-			new Promise((resolve, reject) => {
-				body.on('error', error => {
-					try {
-						expect(error).to.be.an.instanceof(Error).and.have.property('name', 'AbortError');
-						resolve();
-					} catch (error_) {
-						reject(error_);
-					}
+			it('should emit error event to response body with an AbortError when aborted before underlying stream is closed', done => {
+				expect(fetch(
+					`${base}slow`,
+					{signal: controller.signal}
+				))
+					.to.eventually.be.fulfilled
+					.then(res => {
+						res.body.once('error', err => {
+							expect(err)
+								.to.be.an.instanceof(Error)
+								.and.have.property('name', 'AbortError');
+							done();
+						});
+						controller.abort();
+					});
+			});
+
+			it('should cancel request body of type Stream with AbortError when aborted', () => {
+				const body = new stream.Readable({objectMode: true});
+				body._read = () => {};
+				const promise = fetch(
+					`${base}slow`,
+					{signal: controller.signal, body, method: 'POST'}
+				);
+
+				const result = Promise.all([
+					new Promise((resolve, reject) => {
+						body.on('error', error => {
+							try {
+								expect(error).to.be.an.instanceof(Error).and.have.property('name', 'AbortError');
+								resolve();
+							} catch (error_) {
+								reject(error_);
+							}
+						});
+					}),
+					expect(promise).to.eventually.be.rejected
+						.and.be.an.instanceof(Error)
+						.and.have.property('name', 'AbortError')
+				]);
+
+				controller.abort();
+
+				return result;
+			});
+
+			if (moreTests) {
+				moreTests();
+			}
+		});
+	};
+
+	testAbortController('polyfill',
+		() => new AbortControllerPolyfill(),
+		() => {
+			it('should remove internal AbortSignal event listener after request is aborted', () => {
+				const controller = new AbortControllerPolyfill();
+				const {signal} = controller;
+
+				setTimeout(() => {
+					controller.abort();
+				}, 20);
+
+				return expect(fetch(`${base}timeout`, {signal}))
+					.to.eventually.be.rejected
+					.and.be.an.instanceof(Error)
+					.and.have.property('name', 'AbortError')
+					.then(() => {
+						return expect(signal.listeners.abort.length).to.equal(0);
+					});
+			});
+
+			it('should remove internal AbortSignal event listener after request and response complete without aborting', () => {
+				const controller = new AbortControllerPolyfill();
+				const {signal} = controller;
+				const fetchHtml = fetch(`${base}html`, {signal})
+					.then(res => res.text());
+				const fetchResponseError = fetch(`${base}error/reset`, {signal});
+				const fetchRedirect = fetch(`${base}redirect/301`, {signal}).then(res => res.json());
+				return Promise.all([
+					expect(fetchHtml).to.eventually.be.fulfilled.and.equal('<html></html>'),
+					expect(fetchResponseError).to.be.eventually.rejected,
+					expect(fetchRedirect).to.eventually.be.fulfilled
+				]).then(() => {
+					expect(signal.listeners.abort.length).to.equal(0);
 				});
-			}),
-			expect(promise).to.eventually.be.rejected
-				.and.be.an.instanceof(Error)
-				.and.have.property('name', 'AbortError')
-		]);
+			});
+		}
+	);
 
-		controller.abort();
+	testAbortController('mysticatea', () => new AbortControllerMysticatea());
 
-		return result;
-	});
+	if (process.version > 'v15') {
+		testAbortController('native', () => new AbortController());
+	}
 
-	it('should throw a TypeError if a signal is not of type AbortSignal', () => {
+	it('should throw a TypeError if a signal is not of type AbortSignal or EventTarget', () => {
 		return Promise.all([
 			expect(fetch(`${base}inspect`, {signal: {}}))
 				.to.be.eventually.rejected
@@ -1034,6 +1173,17 @@ describe('node-fetch', () => {
 				.to.be.eventually.rejected
 				.and.be.an.instanceof(TypeError)
 				.and.have.property('message').includes('AbortSignal')
+		]);
+	});
+
+	it('should gracefully handle a nullish signal', () => {
+		return Promise.all([
+			fetch(`${base}hello`, {signal: null}).then(res => {
+				return expect(res.ok).to.be.true;
+			}),
+			fetch(`${base}hello`, {signal: undefined}).then(res => {
+				return expect(res.ok).to.be.true;
+			})
 		]);
 	});
 
@@ -1125,10 +1275,11 @@ describe('node-fetch', () => {
 	});
 
 	it('should allow POST request with ArrayBuffer body', () => {
+		const encoder = new TextEncoder();
 		const url = `${base}inspect`;
 		const options = {
 			method: 'POST',
-			body: stringToArrayBuffer('Hello, world!\n')
+			body: encoder.encode('Hello, world!\n').buffer
 		};
 		return fetch(url, options).then(res => res.json()).then(res => {
 			expect(res.method).to.equal('POST');
@@ -1155,10 +1306,11 @@ describe('node-fetch', () => {
 	});
 
 	it('should allow POST request with ArrayBufferView (Uint8Array) body', () => {
+		const encoder = new TextEncoder();
 		const url = `${base}inspect`;
 		const options = {
 			method: 'POST',
-			body: new Uint8Array(stringToArrayBuffer('Hello, world!\n'))
+			body: encoder.encode('Hello, world!\n')
 		};
 		return fetch(url, options).then(res => res.json()).then(res => {
 			expect(res.method).to.equal('POST');
@@ -1170,10 +1322,11 @@ describe('node-fetch', () => {
 	});
 
 	it('should allow POST request with ArrayBufferView (DataView) body', () => {
+		const encoder = new TextEncoder();
 		const url = `${base}inspect`;
 		const options = {
 			method: 'POST',
-			body: new DataView(stringToArrayBuffer('Hello, world!\n'))
+			body: new DataView(encoder.encode('Hello, world!\n').buffer)
 		};
 		return fetch(url, options).then(res => res.json()).then(res => {
 			expect(res.method).to.equal('POST');
@@ -1200,10 +1353,11 @@ describe('node-fetch', () => {
 	});
 
 	it('should allow POST request with ArrayBufferView (Uint8Array, offset, length) body', () => {
+		const encoder = new TextEncoder();
 		const url = `${base}inspect`;
 		const options = {
 			method: 'POST',
-			body: new Uint8Array(stringToArrayBuffer('Hello, world!\n'), 7, 6)
+			body: encoder.encode('Hello, world!\n').subarray(7, 13)
 		};
 		return fetch(url, options).then(res => res.json()).then(res => {
 			expect(res.method).to.equal('POST');
@@ -1422,7 +1576,7 @@ describe('node-fetch', () => {
 	});
 
 	it('should still recognize URLSearchParams when extended', () => {
-		class CustomSearchParameters extends URLSearchParams { }
+		class CustomSearchParameters extends URLSearchParams {}
 		const parameters = new CustomSearchParameters();
 		parameters.append('a', '1');
 
@@ -1444,7 +1598,7 @@ describe('node-fetch', () => {
 	/* For 100% code coverage, checks for duck-typing-only detection
 	 * where both constructor.name and brand tests fail */
 	it('should still recognize URLSearchParams when extended from polyfill', () => {
-		class CustomPolyfilledSearchParameters extends URLSearchParams { }
+		class CustomPolyfilledSearchParameters extends URLSearchParams {}
 		const parameters = new CustomPolyfilledSearchParameters();
 		parameters.append('a', '1');
 
@@ -1995,7 +2149,9 @@ describe('node-fetch', () => {
 	it('should reject if attempt to accumulate body stream throws', () => {
 		const res = new Response(stream.Readable.from((async function * () {
 			yield Buffer.from('tada');
-			await new Promise(resolve => setTimeout(resolve, 200));
+			await new Promise(resolve => {
+				setTimeout(resolve, 200);
+			});
 			yield {tada: 'yes'};
 		})()));
 
@@ -2010,6 +2166,8 @@ describe('node-fetch', () => {
 		let called = 0;
 		function lookupSpy(hostname, options, callback) {
 			called++;
+
+			// eslint-disable-next-line node/prefer-promises/dns
 			return lookup(hostname, options, callback);
 		}
 
@@ -2025,6 +2183,8 @@ describe('node-fetch', () => {
 		const family = Symbol('family');
 		function lookupSpy(hostname, options, callback) {
 			families.push(options.family);
+
+			// eslint-disable-next-line node/prefer-promises/dns
 			return lookup(hostname, {}, callback);
 		}
 
@@ -2120,42 +2280,9 @@ describe('node-fetch', () => {
 		expect(extractContentType(null)).to.be.null;
 	});
 
-	it('should encode URLs as UTF-8', () => {
+	it('should encode URLs as UTF-8', async () => {
 		const url = `${base}möbius`;
-
-		fetch(url).then(res => expect(res.url).to.equal(`${base}m%C3%B6bius`));
-	});
-
-	describe('data uri', () => {
-		const dataUrl = 'data:image/gif;base64,R0lGODlhAQABAIAAAAUEBAAAACwAAAAAAQABAAACAkQBADs=';
-
-		const invalidDataUrl = 'data:@@@@';
-
-		it('should accept data uri', () => {
-			return fetch(dataUrl).then(r => {
-				console.assert(r.status === 200);
-				console.assert(r.headers.get('Content-Type') === 'image/gif');
-
-				return r.buffer().then(b => {
-					console.assert(b instanceof Buffer);
-				});
-			});
-		});
-
-		it('should accept data uri 2', async () => {
-			const r = await fetch('data:text/plain;charset=UTF-8;page=21,the%20data:1234,5678');
-			expect(r.status).to.equal(200);
-			expect(r.headers.get('Content-Type')).to.equal('text/plain;charset=UTF-8;page=21');
-
-			const b = await r.text();
-			expect(b).to.equal('the data:1234,5678');
-		});
-
-		it('should reject invalid data uri', () => {
-			return fetch(invalidDataUrl).catch(error => {
-				console.assert(error);
-				console.assert(error.message.includes('invalid URL'));
-			});
-		});
+		const res = await fetch(url);
+		expect(res.url).to.equal(`${base}m%C3%B6bius`);
 	});
 });

@@ -1,17 +1,25 @@
 
 import * as stream from 'stream';
 import chai from 'chai';
-import stringToArrayBuffer from 'string-to-arraybuffer';
 import Blob from 'fetch-blob';
 import {Response} from '../src/index.js';
 import TestServer from './utils/server.js';
 
 const {expect} = chai;
 
-const local = new TestServer();
-const base = `http://${local.hostname}:${local.port}/`;
-
 describe('Response', () => {
+	const local = new TestServer();
+	let base;
+
+	before(async () => {
+		await local.start();
+		base = `http://${local.hostname}:${local.port}/`;
+	});
+
+	after(async () => {
+		return local.stop();
+	});
+
 	it('should have attributes conforming to Web IDL', () => {
 		const res = new Response();
 		const enumerableProperties = [];
@@ -26,6 +34,7 @@ describe('Response', () => {
 			'blob',
 			'json',
 			'text',
+			'type',
 			'url',
 			'status',
 			'ok',
@@ -40,6 +49,7 @@ describe('Response', () => {
 		for (const toCheck of [
 			'body',
 			'bodyUsed',
+			'type',
 			'url',
 			'status',
 			'ok',
@@ -116,6 +126,7 @@ describe('Response', () => {
 		});
 		const cl = res.clone();
 		expect(cl.headers.get('a')).to.equal('1');
+		expect(cl.type).to.equal('default');
 		expect(cl.url).to.equal(base);
 		expect(cl.status).to.equal(346);
 		expect(cl.statusText).to.equal('production');
@@ -150,7 +161,8 @@ describe('Response', () => {
 	});
 
 	it('should support ArrayBuffer as body', () => {
-		const res = new Response(stringToArrayBuffer('a=1'));
+		const encoder = new TextEncoder();
+		const res = new Response(encoder.encode('a=1'));
 		return res.text().then(result => {
 			expect(result).to.equal('a=1');
 		});
@@ -164,14 +176,16 @@ describe('Response', () => {
 	});
 
 	it('should support Uint8Array as body', () => {
-		const res = new Response(new Uint8Array(stringToArrayBuffer('a=1')));
+		const encoder = new TextEncoder();
+		const res = new Response(encoder.encode('a=1'));
 		return res.text().then(result => {
 			expect(result).to.equal('a=1');
 		});
 	});
 
 	it('should support DataView as body', () => {
-		const res = new Response(new DataView(stringToArrayBuffer('a=1')));
+		const encoder = new TextEncoder();
+		const res = new Response(new DataView(encoder.encode('a=1').buffer));
 		return res.text().then(result => {
 			expect(result).to.equal('a=1');
 		});
@@ -192,5 +206,13 @@ describe('Response', () => {
 	it('should default to empty string as url', () => {
 		const res = new Response();
 		expect(res.url).to.equal('');
+	});
+
+	it('should support error() static method', () => {
+		const res = Response.error();
+		expect(res).to.be.an.instanceof(Response);
+		expect(res.type).to.equal('error');
+		expect(res.status).to.equal(0);
+		expect(res.statusText).to.equal('');
 	});
 });
